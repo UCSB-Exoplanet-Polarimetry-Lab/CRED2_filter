@@ -223,7 +223,7 @@ def create_wiener_filter(image_psd, dark_psd, weight, power):
         as a function of the signal to noise ratio.  
         
     Returns:
-        numpy.ndarray: The bandstop filter mask.
+        numpy.ndarray: The Wiener filter mask.
     """
     # check for valid input conditions
     if weight < 0:
@@ -232,5 +232,5 @@ def create_wiener_filter(image_psd, dark_psd, weight, power):
     if power < 0:
         raise ValueError('Power must be a positive value')
     
-    # construct wiener filter
+    # construct Wiener filter
     return (image_psd / (image_psd + (weight * dark_psd)))**power
