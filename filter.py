@@ -201,7 +201,7 @@ def create_bandstop_filter(dark_psd, threshold, zeroth_order_transmission_width,
     # shift back so things work as normal
     bandstop_filter = np.fft.ifftshift(bandstop_filter)
 
-    # applying convolve with a gaussian to minimize ringing artifacts in the spatial domain
+    # convolve with a gaussian to minimize ringing artifacts in the spatial domain
     bandstop_filter = gaussian_filter(bandstop_filter, gaussian_kernel_radius)
 
     return bandstop_filter
