@@ -206,7 +206,7 @@ def create_bandstop_filter(dark_psd, threshold, zeroth_order_transmission_width,
 
     return bandstop_filter
 
-def apply_wiener_filter(image_psd, dark_psd, weight, power):
+def create_wiener_filter(image_psd, dark_psd, weight, power):
     """
     Creates a transmission profile as a function of spatial frequency. This filter compares the spatial frequencies
     occupied by the science image and the spatial frequencies occupied by the noise and selectively attenuates the
