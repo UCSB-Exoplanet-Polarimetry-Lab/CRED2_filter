@@ -1,20 +1,10 @@
 import numpy as np
 from astropy.io import fits
-from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
-from astropy.convolution import interpolate_replace_nans, Gaussian2DKernel
 import os
 import glob
 
-def average_dataset(file_path):
-    # averages the images in a fits dataset
-    hdul = fits.open(file_path)
-    image_datacube = np.array(hdul[0].data)
-    if (image_datacube.ndim == 2):
-        return image_datacube
-    return np.mean(image_datacube, axis=0)
-
-def average_dataset_from_directory(directory_path):
+def average_dataset(directory_path):
     """
     Computes the mean image from a directory containing multiple 2D FITS files.
     
@@ -72,34 +62,7 @@ def average_dataset_from_directory(directory_path):
     
     return avg_image
 
-
-def construct_psd(file_path):
-    # construct averaged psd when given a fits dataset
-    hdul = fits.open(file_path)
-    size_x = hdul[0].header['NAXIS1']
-    size_y = hdul[0].header['NAXIS2']
-    try: 
-        nframes = hdul[0].header['NAXIS3']
-    except KeyError as e:
-        nframes = 1
-
-    if nframes == 1:
-        image_datacube = np.array([hdul[0].data])
-    else:
-        image_datacube = np.array(hdul[0].data)
-    psd_datacube = np.zeros(shape=(nframes, size_y, size_x)) 
-    hdul.close()
-
-    # compute the power spectral density of each frane
-    for i in range(nframes):
-        # magnitude squared of fft
-        psd_datacube[i] = (np.abs(np.fft.fft2(image_datacube[i])))**2
-        
-    # average and return final averaged PSD
-    psd = np.mean(psd_datacube, axis=0)
-    return psd
-
-def construct_psd_from_directory(directory_path):
+def construct_average_psd_from_dataset(directory_path):
     """
     Constructs the averaged PSD from a directory containing 2D FITS files.
     
@@ -161,114 +124,25 @@ def construct_psd_from_directory(directory_path):
     
     return avg_psd
 
-def scipy_interpolate(data, mask, method):
+
+def dark_sub(image, dark, saturation_limit=15000, transition_width=250):
     """
-    Uses cubic interpolation to recover signal structure in masked regions.
-    mask: 0 where data was removed (hole), 1 where data is valid.
+    Subtracts the dark image from the science image. Since noise patterns are only
+    visible on nonsaturated portions of the image, dark subtraction is not applied
+    to the saturated pixels, as doing so would leave negative imprints of the dark
+    image on the science image. 
+    
+    Args:
+        image (numpy.ndarray): The input science image.
+        dark (numpy.ndarray): The corresponding dark image to be subtracted off.
+        saturation_limit (int): The numerical pixel value corresponding to saturation of the detector.
+        transition_width (int): Determines how sharp the subtraction cutoff gradient is at the saturation limit,
+        The dark sub starts tapering off for pixel values greater than saturation_limit - transition_width,
+        and for pixel values greater than saturation_limit + transition width, no subtraction is applied.
+        
+    Returns:
+        numpy.ndarray: The dark subtracted science image.
     """
-    # 1. Setup coordinates
-    h, w = data.shape
-    y, x = np.mgrid[0:h, 0:w]
-    
-    # 2. Separate into "Known" points and "Unknown" points
-    # We want to interpolate values at 'unknown_points' using 'known_points'
-    known_y = y[mask == 1]
-    known_x = x[mask == 1]
-    known_points = np.column_stack((known_x, known_y))
-    
-    unknown_y = y[mask == 0]
-    unknown_x = x[mask == 0]
-    target_points = np.column_stack((unknown_x, unknown_y))
-    
-    # Optimization: If the image is huge (e.g. 4k x 4k), griddata is slow.
-    # It is faster to only pass valid points that are NEAR the holes.
-    # But for standard 512x512 or 1k x 1k, this is usually acceptable.
-    
-    # 3. Get the known values
-    known_data = data[mask == 1]
-    
-    print(f"Interpolating {len(target_points)} pixels... this might take a moment.")
-
-    # 4. Interpolate Real and Imaginary parts separately
-    # 'cubic' method is CRITICAL here. 'nearest' creates steps, 'linear' creates cones.
-    # 'cubic' creates smooth curves which mimics real signal diffraction patterns.
-    
-    # We use fill_value=0 just in case valid data doesn't perfectly convex hull the hole
-    # (though in a notch filter, the hole is usually internal, so it's fine)
-    
-    real_interp = griddata(
-        known_points, known_data.real, target_points, method=method, fill_value=0
-    )
-    
-    imag_interp = griddata(
-        known_points, known_data.imag, target_points, method=method, fill_value=0
-    )
-    
-    # 5. Recombine
-    reconstructed_hole = real_interp + 1j * imag_interp
-    
-    # 6. Patch the original array
-    interpolated_data = data.copy()
-    interpolated_data[mask == 0] = reconstructed_hole
-    
-    return interpolated_data
-
-def astropy_interpolate(data, mask, radius):
-    bad_pixels = (mask == 0)
-
-    # set 0 values to NaN in order to perform interpolation
-    data[bad_pixels] = np.nan
-
-    # split ft into real and imaginary parts to interpolate separtely
-    data_real = data.real
-    data_imag = data.imag
-
-    # radius of interpolation kernel
-    radius = 1
-    kernel = Gaussian2DKernel(x_stddev=radius)
-
-    # perform interpolation
-    interpolated_data_real = interpolate_replace_nans(data_real, kernel)
-    interpolated_data_imag = interpolate_replace_nans(data_imag, kernel)
-    interpolated_data = interpolated_data_real + (1j * interpolated_data_imag)
-    return interpolated_data
-
-def improve_mask(mask, neighbor_threshold):
-    # make filter more robust so that single pixels of 0 with no neighbors are replaced with 1,
-    # pixels with at least the neighbor threshold have all their neighbors filled with with 0s
-    mask_new = mask.copy()
-    for i in range(1, mask.shape[0] - 1):
-        for j in range(1, mask.shape[1] - 1):
-            if mask[i, j] == 0:
-                n_neighbors = 0
-                for k in range(i - 1, i + 2):
-                    for l in range(j - 1, j + 2):
-                        if mask[k, l] == 0:
-                            n_neighbors += 1
-                if n_neighbors >= neighbor_threshold:
-                    for k in range(i - 1, i + 2):
-                        for l in range(j - 1, j + 2):
-                            mask_new[k, l] = 0
-                else:
-                    mask_new[i, j] = 1
-    return mask_new
-
-def add_gradient(mask, n_iterations):
-    if (n_iterations <= 0):
-        return mask
-    mask_new = mask.copy()
-    for i in range(1, mask.shape[0] - 1):
-        for j in range(1, mask.shape[1] - 1):
-            if mask[i,j] > 0:
-                for k in range(i - 1, i + 2):
-                    for l in range(j - 1, j + 2):
-                        if mask[k, l] == 0:
-                            mask_new[k, l] = 0.5 * mask[i,j]
-    if (n_iterations > 1):
-         return add_gradient(mask_new, n_iterations - 1)
-    return mask_new
-
-def smart_dark_sub(image, dark, saturation_limit=14000, transition_width=500):
     start_limit = saturation_limit - transition_width
     end_limit = saturation_limit + transition_width
     weights = np.zeros(shape=image.shape)
@@ -281,45 +155,82 @@ def smart_dark_sub(image, dark, saturation_limit=14000, transition_width=500):
     # compute dark sub with the added weight gradient
     return image - (weights * dark)
 
-def apply_notch_filter(image, dark_psd, threshold, lowpass_transmission_width_percentage, gaussian_kernel_radius):
-    # create notch filter from dark psd
-    # set threshold from 0 to 1, determines how agressive notch filter is
-    # for example threshold of 0.1 creates notch filter where the top 10% highest value pixels in the dark PSD is blocked,
+def create_bandstop_filter(dark_psd, threshold, zeroth_order_transmission_width, gaussian_kernel_radius):
+    """
+    Creates a transmission profile as a function of spatial frequency. This filter estimates 
+    the spatial frequencies of the structural noise using the power spectral density of the dark image
+    and places a stopband at those frequencies. 
+    
+    Args:
+        dark_psd (numpy.ndarray): The power spectral density of the dark image.
+        threshold (float): Controls the aggressiveness of the filter, ranges from 0 to 1, higher value corresponds to a
+        more aggressive filter.
+        zeroth_order_transition_width (float): The width of the zeroth order passband as a percentage of the total image width,
+        ranges from 0 to 1. 
+        gaussian_kernel_radius (int): The radius of the gaussian kernel used for convolution with the filter mask 
+        
+    Returns:
+        numpy.ndarray: The bandstop filter mask.
+    """
+    # check for valid input conditions
+    if threshold < 0 or threshold > 1:
+        raise ValueError('threshold must be in between 0 and 1')
+    
+    if zeroth_order_transmission_width < 0 or zeroth_order_transmission_width > 1:
+        raise ValueError('zeroth_order_transmission_width must be in between 0 and 1')
+    
+    # create bandstop filter from dark psd
+    # set the cutoff percentile that determines which frequencies are transmitted or attenuated
+    # for example threshold of 0.1 creates bandstop filter where the top 10% highest value pixels in the dark PSD is blocked,
     # everything else is transmitted with a coefficient of 1
     percentile_cutoff = (1 - threshold) * 100
     cutoff = np.percentile(dark_psd, percentile_cutoff)
     print(cutoff)
-    notch_filter = np.ones_like(dark_psd)
+    bandstop_filter = np.ones_like(dark_psd)
     # zero out everything above cutoff
-    notch_filter[dark_psd>cutoff] = 0
+    bandstop_filter[dark_psd>cutoff] = 0
 
     # force DC component transmission to be one so DC component is conserved
     # shift fft so that DC component is in the middle
-    notch_filter = np.fft.fftshift(notch_filter)
-    img_shape = notch_filter.shape
+    bandstop_filter = np.fft.fftshift(bandstop_filter)
+    img_shape = bandstop_filter.shape
     center_y = img_shape[0] // 2
     center_x = img_shape[1] // 2
-    # what percentage of the total image width do we want the size of the DC/low passband to be
-    lowpass_transmission_width_percentage = 30
-    n_pix = img_shape[0] // lowpass_transmission_width_percentage
-    notch_filter[center_y-n_pix:center_y+n_pix, center_x-n_pix:center_x+n_pix] = 1
+    n_pix = round(img_shape[0] * zeroth_order_transmission_width)
+    bandstop_filter[center_y-n_pix:center_y+n_pix, center_x-n_pix:center_x+n_pix] = 1
     # shift back so things work as normal
-    notch_filter = np.fft.ifftshift(notch_filter)
-    # applying blurring to filter to minimize artifacts
-    notch_filter = gaussian_filter(notch_filter, gaussian_kernel_radius)
+    bandstop_filter = np.fft.ifftshift(bandstop_filter)
 
-    # apply filter to image
-    image_ft = np.fft.fft2(image)
-    filtered_ft = image_ft * notch_filter
-    filtered_image = np.abs(np.fft.ifft2(filtered_ft))
+    # applying convolve with a gaussian to minimize ringing artifacts in the spatial domain
+    bandstop_filter = gaussian_filter(bandstop_filter, gaussian_kernel_radius)
 
-    return filtered_image
+    return bandstop_filter
 
-def apply_wiener_filter(image, dark_psd, weight, gain):
-    image_ft = np.fft.fft2(image)
-    image_psd = (np.abs(image_ft))**2
-    wiener_filter = (image_psd / (image_psd + (weight * dark_psd)))**gain
-    filtered_ft = image_ft * wiener_filter
-    filtered_image = np.abs(np.fft.ifft2(filtered_ft))
-
-    return filtered_image
+def apply_wiener_filter(image_psd, dark_psd, weight, power):
+    """
+    Creates a transmission profile as a function of spatial frequency. This filter compares the spatial frequencies
+    occupied by the science image and the spatial frequencies occupied by the noise and selectively attenuates the
+    frequencies more dominated by the noise. The transmission profile is given generally by the formula
+    [|(S(u,v)|^2)/(|S(u,v)|^2+weight*|N(u,v)|^2)]^power where |S(u,v)|^2 is the power spectral density of the science
+    image and |N(u,v)|^2 is the power spectral density of the dark image.
+    
+    Args:
+        image_psd (numpy.ndarray): The power spectral density of the science image
+        dark_psd (numpy.ndarray): The power spectral density of the dark image.
+        Weight (float): Determines how heavily the noise is weighted against the signal. A higher weight value corresponds
+        to a more aggressive filter.
+        power (float): Determines how aggressive the filter is. A higher power value creates a steeper attenuation gradient
+        as a function of the signal to noise ratio.  
+        
+    Returns:
+        numpy.ndarray: The bandstop filter mask.
+    """
+    # check for valid input conditions
+    if weight < 0:
+        raise ValueError('Weight must be a positive value')
+    
+    if power < 0:
+        raise ValueError('Power must be a positive value')
+    
+    # construct wiener filter
+    return (image_psd / (image_psd + (weight * dark_psd)))**power
