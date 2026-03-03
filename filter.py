@@ -153,7 +153,11 @@ def dark_sub(image, dark, saturation_limit=15000, transition_width=250):
     weights[in_btwn_indices] = (end_limit - image[in_btwn_indices]) / (2 * transition_width)
 
     # compute dark sub with the added weight gradient
-    return image - (weights * dark)
+    ds_image = image - (weights * dark)
+
+    # set the pixel value lowerbound of our dark subtracted image to 0 to prevent artifacts when filters are applied later on
+    ds_image[ds_image < 0] = 0
+    return ds_image
 
 def create_bandstop_filter(dark_psd, threshold, zeroth_order_transmission_width, gaussian_kernel_radius):
     """
@@ -185,7 +189,6 @@ def create_bandstop_filter(dark_psd, threshold, zeroth_order_transmission_width,
     # everything else is transmitted with a coefficient of 1
     percentile_cutoff = (1 - threshold) * 100
     cutoff = np.percentile(dark_psd, percentile_cutoff)
-    print(cutoff)
     bandstop_filter = np.ones_like(dark_psd)
     # zero out everything above cutoff
     bandstop_filter[dark_psd>cutoff] = 0
